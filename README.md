@@ -71,9 +71,4 @@ The assistant is designed to process **images**, detect objects, and provide con
 
 ---
 
-## Next Steps
-- Add **multi-object summaries** (when multiple objects detected).  
-- Experiment with **local captioning models** for better context.  
-- Optimize YOLO inference for **faster detection** on CPU.
-
 
