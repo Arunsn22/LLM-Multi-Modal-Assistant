@@ -4,38 +4,51 @@ import ollama
 import re
 import tempfile
 import os
-
-# YOLO imports
 from ultralytics import YOLO
 
+# ---------------- PAGE CONFIG ----------------
 st.set_page_config(page_title="🧠 Offline Multi-Modal Assistant", layout="centered")
 
-# ---------------- STYLES (unchanged) ----------------
+# ---------------- STYLES (enhanced but same dark theme) ----------------
 st.markdown("""
     <style>
         .reportview-container {
-            background: #1e1e2f;
+            background: linear-gradient(135deg, #1e1e2f, #2a2a40);
             color: white;
         }
         h1, h2, h3 {
             color: #00FFAA;
+            text-align: center;
+            animation: glow 2s ease-in-out infinite alternate;
+        }
+        @keyframes glow {
+            from { text-shadow: 0 0 5px #00FFAA; }
+            to { text-shadow: 0 0 15px #00FFAA, 0 0 25px #00FFAA; }
         }
         .stButton > button {
-            background-color: #4CAF50;
-            color: white;
+            background: linear-gradient(90deg, #00FFAA, #00DD88);
+            color: black;
             font-weight: bold;
             border-radius: 8px;
             margin-top: 1rem;
+            transition: all 0.3s ease;
+            border: none;
+        }
+        .stButton > button:hover {
+            transform: scale(1.05);
+            background: linear-gradient(90deg, #00DD88, #00FFAA);
         }
         .chat-box {
             background-color: #2b2b3d;
             color: white;
             padding: 1rem;
             border-radius: 12px;
-            font-size: 1rem;
+            font-size: 1.1rem;
             line-height: 1.6;
-            border-left: 4px solid #00FFAA;
+            border-left: 5px solid #00FFAA;
             margin-top: 1rem;
+            box-shadow: 0 0 10px #00FFAA33;
+            white-space: pre-wrap;
         }
         .refresh-btn {
             display: flex;
@@ -45,53 +58,39 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# ---------------- HEADER (unchanged) ----------------
-st.title("🧠 Offline Multi-Modal Assistant")
-st.subheader("💡 Ask questions about uploaded images using local object detection + llama3")
+# ---------------- HEADER ----------------
+st.title("Multi-Modal Assistant")
+st.subheader("💡 Ask away!!!")
 
 # ---------------- YOLO LOADING ----------------
 @st.cache_resource(show_spinner=False)
 def load_yolo_model():
-    """
-    Loads YOLO model. If local weights exist at ./models/yolov8n.pt, uses them.
-    Otherwise, Ultralytics will download yolov8n weights on first run.
-    """
+    """Load YOLO model, prefer local weights."""
     local_weights = os.path.join("models", "yolov8n.pt")
     if os.path.exists(local_weights):
         return YOLO(local_weights)
-    # Small & fast model
     return YOLO("yolov8n.pt")
 
 def detect_objects_yolo(pil_image, conf=0.35, max_labels=20):
-    """
-    Runs YOLO on a PIL image and returns a deduplicated list of labels sorted by frequency.
-    """
+    """Run YOLO and return list of detected labels."""
     model = load_yolo_model()
     results = model.predict(pil_image, conf=conf, verbose=False)
     if not results or len(results) == 0:
         return []
-
     res = results[0]
-    names = model.names  # class index -> label name
+    names = model.names
     if res.boxes is None or len(res.boxes) == 0:
         return []
-
-    cls_indices = res.boxes.cls.tolist()
-    # Count frequency
     from collections import Counter
+    cls_indices = res.boxes.cls.tolist()
     labels = [names[int(i)] for i in cls_indices]
     freq = Counter(labels)
-    # Sort by frequency desc, keep unique labels
     sorted_labels = [lab for lab, _ in freq.most_common(max_labels)]
     return sorted_labels
 
-# ---------------- STREAMING (fixed to avoid metadata tail) ----------------
+# ---------------- STREAMING CLEAN OUTPUT ----------------
 def safe_stream_llama3(prompt: str):
-    """
-    Stream llama3 output using the Ollama Python client.
-    Only display clean text (no chunk metadata).
-    Falls back to non-stream if streaming not supported.
-    """
+    """Stream clean text output from LLaMA 3."""
     try:
         stream_iter = ollama.chat(
             model="llama3",
@@ -101,27 +100,19 @@ def safe_stream_llama3(prompt: str):
         collected = ""
         for chunk in stream_iter:
             piece = ""
-
-            # Handle object response (newer clients)
             if hasattr(chunk, "message") and getattr(chunk.message, "content", None):
                 piece = chunk.message.content
-            # Handle dict response (some client versions)
             elif isinstance(chunk, dict):
                 msg = chunk.get("message", {})
                 if isinstance(msg, dict):
                     piece = msg.get("content", "") or ""
                 else:
                     piece = chunk.get("content", "") or ""
-
-            # ✅ Skip empty strings / metadata-only chunks
             if not piece or not piece.strip():
                 continue
-
             collected += piece
             yield collected
-
     except TypeError:
-        # stream argument not supported → synchronous fallback
         resp = ollama.chat(
             model="llama3",
             messages=[{"role": "user", "content": prompt}],
@@ -136,33 +127,43 @@ def safe_stream_llama3(prompt: str):
             content = str(resp)
         yield content
 
-# ---------------- FORM (unchanged) ----------------
+# ---------------- FORM ----------------
 with st.form("image_form"):
-    uploaded_image = st.file_uploader("📷 Upload an image", type=["jpg", "jpeg", "png"])
-    question = st.text_input("💬 What would you like to ask about the image?")
+    uploaded_image = st.file_uploader("📷 Upload an image (optional)", type=["jpg", "jpeg", "png"])
+    question = st.text_input("💬 Ask a question (about the image or anything):")
     submitted = st.form_submit_button("🧠 Get Answer")
 
-# ---------------- PROCESSING (UI unchanged; logic improved) ----------------
-if submitted and uploaded_image and question.strip():
-    image = Image.open(uploaded_image).convert("RGB")
-    st.image(image, caption="🖼️ Uploaded Image", use_container_width=True)
+# ---------------- PROCESSING ----------------
+if submitted and question.strip():
+    detected_text = ""
 
-    # 1) Detect objects with YOLO (offline after first weights download)
-    with st.spinner("🔍 Detecting objects in the image..."):
-        detected_objects = detect_objects_yolo(image, conf=0.35)
-    detected_text = ", ".join(detected_objects) if detected_objects else "No recognizable objects detected."
+    # If an image is uploaded, detect objects first
+    if uploaded_image:
+        image = Image.open(uploaded_image).convert("RGB")
+        st.image(image, caption="🖼️ Uploaded Image", use_container_width=True)
+        with st.spinner("🔍 Detecting objects in the image..."):
+            detected_objects = detect_objects_yolo(image, conf=0.35)
+        detected_text = ", ".join(detected_objects) if detected_objects else "No recognizable objects detected."
 
-    # 2) Ask llama3 with those detections (keeps answers professional & concise)
-    prompt = (
-        "You are a concise and professional assistant. "
-        "Answer strictly based on the detected objects and the user's question. "
-        "Avoid informal descriptors; use plain object names. "
-        "If uncertain, state that briefly.\n\n"
-        f"Detected objects in the image: {detected_text}\n"
-        f"User question: {question}\n\n"
-        "Provide a short, factual, unambiguous answer."
-    )
+    # Create prompt depending on whether an image is present
+    if uploaded_image:
+        prompt = (
+            "You are a concise and professional assistant. "
+            "Answer strictly based on the detected objects and user's question. "
+            "Avoid informal tone; use precise language.\n\n"
+            f"Detected objects in the image: {detected_text}\n"
+            f"User question: {question}\n\n"
+            "Provide a short, factual, and professional answer."
+        )
+    else:
+        prompt = (
+            "You are a concise and professional AI assistant. "
+            "Answer the user's question clearly and factually, keeping tone formal and direct.\n\n"
+            f"User question: {question}\n\n"
+            "Provide a brief, accurate response."
+        )
 
+    # Stream response
     answer_placeholder = st.empty()
     with st.spinner("🤖 Thinking..."):
         collected_text = ""
@@ -174,7 +175,7 @@ if submitted and uploaded_image and question.strip():
                 unsafe_allow_html=True
             )
 
-    # ✅ Refresh button (unchanged)
+    # Refresh button
     st.markdown("""
         <div class='refresh-btn'>
             <form action="" method="get">
